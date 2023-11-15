@@ -115,6 +115,11 @@ func (c *Cluster) Start() error {
 	daemonIDs := c.getDaemonIDs()
 	var deploymentsToWaitFor []*v1.Deployment
 
+	mgrsToSkipReconcile, err := c.getMGRsToSkipReconcile()
+	if err != nil {
+		return errors.Wrap(err, "failed to check for mgrs to skip reconcile")
+	}
+
 	for _, daemonID := range daemonIDs {
 		if c.clusterInfo.Context.Err() != nil {
 			return c.clusterInfo.Context.Err()
@@ -145,23 +150,17 @@ func (c *Cluster) Start() error {
 			return errors.Wrapf(err, "failed to set annotation for deployment %q", d.Name)
 		}
 
+		if mgrsToSkipReconcile.Has(daemonID) {
+			logger.Warningf("Skipping reconcile of mgr %q since labeled with %s", daemonID, cephv1.SkipReconcileLabelKey)
+			continue
+		}
+
 		newDeployment, err := c.context.Clientset.AppsV1().Deployments(c.clusterInfo.Namespace).Create(c.clusterInfo.Context, d, metav1.CreateOptions{})
 		if err != nil {
 			if !kerrors.IsAlreadyExists(err) {
 				return errors.Wrapf(err, "failed to create mgr deployment %s", resourceName)
 			}
 			logger.Infof("deployment for mgr %s already exists. updating if needed", resourceName)
-
-			mgrsToSkipReconcile, err := c.getMGRsToSkipReconcile()
-
-			if err != nil {
-				return errors.Wrap(err, "failed to check for mgrs to skip reconcile")
-			}
-
-			if mgrsToSkipReconcile.Len() > 0 {
-				logger.Warningf("skipping mgr reconcile since mons are labeled with %s: %v", cephv1.SkipReconcileLabelKey, sets.List(mgrsToSkipReconcile))
-				return nil
-			}
 
 			if err := updateDeploymentAndWait(c.context, c.clusterInfo, d, config.MgrType, mgrConfig.DaemonID, c.spec.SkipUpgradeChecks, false); err != nil {
 				logger.Errorf("failed to update mgr deployment %q. %v", resourceName, err)
